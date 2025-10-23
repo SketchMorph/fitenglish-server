@@ -11,22 +11,29 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 업로드 임시 폴더 준비
+// ✅ 루트 경로 (Render 헬스체크 대응)
+app.get("/", (req, res) => {
+  res.status(200).send("ok");
+});
+
+// ✅ 헬스체크 (Render 모니터링용)
+app.get("/healthz", (req, res) => {
+  res.status(200).send("ok");
+});
+app.get("/health", (_req, res) => res.json({ ok: true, time: Date.now() }));
+
+// ===== 업로드 임시 폴더 =====
 const UPLOADS = path.join(process.cwd(), "uploads");
 if (!fs.existsSync(UPLOADS)) fs.mkdirSync(UPLOADS, { recursive: true });
 const upload = multer({ dest: UPLOADS });
 
-// OpenAI 클라이언트
+// ===== OpenAI 클라이언트 =====
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-// 헬스체크
-app.get("/health", (_req, res) => res.json({ ok: true, time: Date.now() }));
 
 /**
  * 1) /transcribe
  *   - 클라이언트 필드명: "file"
  *   - 리턴: { text }
- *   - ListeningReadingScreen 등에서 사용
  */
 app.post("/transcribe", upload.single("file"), async (req, res) => {
   let tempPath;
@@ -37,7 +44,7 @@ app.post("/transcribe", upload.single("file"), async (req, res) => {
     const resp = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tempPath),
       model: "whisper-1",
-      language: "en"
+      language: "en",
     });
 
     res.json({ text: resp.text || "" });
@@ -45,7 +52,11 @@ app.post("/transcribe", upload.single("file"), async (req, res) => {
     console.error("[/transcribe] error:", err);
     res.status(500).json({ error: err.message || "transcribe failed" });
   } finally {
-    if (tempPath) { try { fs.unlinkSync(tempPath); } catch {} }
+    if (tempPath) {
+      try {
+        fs.unlinkSync(tempPath);
+      } catch {}
+    }
   }
 });
 
@@ -53,7 +64,6 @@ app.post("/transcribe", upload.single("file"), async (req, res) => {
  * 2) /speech/score
  *   - 클라이언트 필드명: "audio", "target"
  *   - 리턴: { transcript, accuracy, tips: [] }
- *   - app/services/api.js 에서 사용
  */
 app.post("/speech/score", upload.single("audio"), async (req, res) => {
   let tempPath;
@@ -62,11 +72,11 @@ app.post("/speech/score", upload.single("audio"), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "audio field is required" });
     tempPath = req.file.path;
 
-    // 2-1. Whisper로 음성 → 텍스트
+    // 2-1. Whisper로 음성 → 텍스트 변환
     const tr = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tempPath),
       model: "whisper-1",
-      language: "en"
+      language: "en",
     });
     const transcript = tr.text || "";
 
@@ -78,7 +88,11 @@ app.post("/speech/score", upload.single("audio"), async (req, res) => {
     console.error("[/speech/score] error:", err);
     res.status(500).json({ error: err.message || "score failed" });
   } finally {
-    if (tempPath) { try { fs.unlinkSync(tempPath); } catch {} }
+    if (tempPath) {
+      try {
+        fs.unlinkSync(tempPath);
+      } catch {}
+    }
   }
 });
 
@@ -91,7 +105,8 @@ function normalize(s) {
     .trim();
 }
 function levenshtein(a, b) {
-  const m = a.length, n = b.length;
+  const m = a.length,
+    n = b.length;
   const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
   for (let i = 0; i <= m; i++) dp[i][0] = i;
   for (let j = 0; j <= n; j++) dp[0][j] = j;
@@ -109,10 +124,14 @@ function levenshtein(a, b) {
 }
 function buildTips(ref, hyp) {
   const tips = [];
-  if (hyp.length < ref.length * 0.7) tips.push("문장을 끝까지 또박또박 읽어보세요.");
-  if (/\b(a|an|the)\b/.test(ref) && !/\b(a|an|the)\b/.test(hyp)) tips.push("관사(a/an/the) 발음을 분명히 해보세요.");
-  if (/\b(to|for|of|in|on|at)\b/.test(ref) && !/\b(to|for|of|in|on|at)\b/.test(hyp)) tips.push("전치사(to/for/of 등)를 빠뜨리지 않도록 해보세요.");
-  if (tips.length === 0) tips.push("자연스러운 강세와 끊어 읽기를 연습해보세요.");
+  if (hyp.length < ref.length * 0.7)
+    tips.push("문장을 끝까지 또박또박 읽어보세요.");
+  if (/\b(a|an|the)\b/.test(ref) && !/\b(a|an|the)\b/.test(hyp))
+    tips.push("관사(a/an/the) 발음을 분명히 해보세요.");
+  if (/\b(to|for|of|in|on|at)\b/.test(ref) && !/\b(to|for|of|in|on|at)\b/.test(hyp))
+    tips.push("전치사(to/for/of 등)를 빠뜨리지 않도록 해보세요.");
+  if (tips.length === 0)
+    tips.push("자연스러운 강세와 끊어 읽기를 연습해보세요.");
   return tips.slice(0, 3);
 }
 function simpleTextScore(reference, hypothesis) {
