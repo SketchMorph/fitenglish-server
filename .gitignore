@@ -1,0 +1,48 @@
+# Node dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Build / Expo / Cache
+dist/
+build/
+.expo/
+.expo-shared/
+.cache/
+coverage/
+web-build/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local env
+.env
+.env.*
+!.env.example
+
+# Android / iOS
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+ios/build/
+ios/Pods/
+*.xcworkspace
+*.xcuserdatad/
+DerivedData/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Misc
+tmp/
+temp/
+*.log
