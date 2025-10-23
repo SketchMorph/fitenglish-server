@@ -148,3 +148,33 @@ const PORT = Number(process.env.PORT || 4000);
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });
+
+// server/server.js (기존 코드 하단에 추가)
+app.post("/speech/auto", upload.single("audio"), async (req, res) => {
+  let tempPath;
+  try {
+    const target = String(req.body?.target || "");
+    if (!req.file) return res.status(400).json({ error: "audio field is required" });
+    tempPath = req.file.path;
+
+    // Whisper 전사
+    const tr = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(tempPath),
+      model: "whisper-1",
+      language: "en",
+    });
+    const transcript = tr.text || "";
+
+    // 채점
+    const { accuracy, tips } = simpleTextScore(target, transcript);
+    res.json({ transcript, accuracy, tips });
+  } catch (err) {
+    console.error("[/speech/auto] error:", err);
+    res.status(500).json({ error: err.message || "speech/auto failed" });
+  } finally {
+    if (tempPath) {
+      try { fs.unlinkSync(tempPath); } catch {}
+    }
+  }
+});
+
