@@ -2,38 +2,44 @@
 import express from "express";
 import cors from "cors";
 import multer from "multer";
-import fs from "fs";
-import path from "path";
 import OpenAI from "openai";
 
 const app = express();
 
 // ===== Middleware =====
-app.use(cors());
+app.use(
+  cors({
+    origin: "*",
+  })
+);
 app.use(express.json());
 
-// ✅ 루트 경로 (Render 헬스체크 대응)
+// ===== 헬스체크 =====
 app.get("/", (req, res) => {
   res.status(200).send("ok");
 });
-
-// ✅ 헬스체크 (Render 모니터링용)
 app.get("/healthz", (req, res) => {
   res.status(200).send("ok");
 });
 app.get("/health", (_req, res) => res.json({ ok: true, time: Date.now() }));
 
-// ===== 업로드 임시 폴더 =====
-const UPLOADS = path.join(process.cwd(), "uploads");
-if (!fs.existsSync(UPLOADS)) fs.mkdirSync(UPLOADS, { recursive: true });
-const upload = multer({ dest: UPLOADS });
+// ===== Multer: 메모리 저장 =====
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB
+  },
+});
 
 // ===== OpenAI 클라이언트 =====
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+if (!process.env.OPENAI_API_KEY) {
+  console.error("❌ Missing OPENAI_API_KEY in environment!");
+}
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-/* -------------------------------------------------
-   유틸: 문자열 정규화/채점 함수들 (원본 코드 유지)
-------------------------------------------------- */
+/* ---------------- 텍스트 비교/채점 유틸 ---------------- */
 function normalize(s) {
   return (s || "")
     .toLowerCase()
@@ -86,114 +92,117 @@ function simpleTextScore(reference, hypothesis) {
   return { accuracy, tips: buildTips(ref, hyp) };
 }
 
-/* -------------------------------------------------
-   Whisper 호출을 재시도하는 함수
-   - Render 무료 인스턴스의 첫 네트워크 콜에서 ECONNRESET 등이
-     나오는 걸 완화하기 위한 안정화 레이어
-------------------------------------------------- */
-async function transcribeWithRetry(filePath, tries = 3) {
+/* ---------------- Whisper(STT) with retry (Buffer 기반) ---------------- */
+async function transcribeWithRetryMem(audioBuffer, filename, tries = 3) {
   let lastErr;
   for (let i = 0; i < tries; i++) {
     try {
-      // fs.createReadStream을 매 시도마다 새로 만들어줘야 함
-      const stream = fs.createReadStream(filePath);
+      console.log(`[transcribeWithRetryMem] attempt ${i + 1} ...`);
 
       const resp = await openai.audio.transcriptions.create({
-        file: stream,
-        model: "whisper-1",
-        language: "en",
+        file: {
+          buffer: audioBuffer,
+          filename: filename || "audio.m4a",
+          contentType: "audio/m4a",
+        },
+        model: "gpt-4o-mini-transcribe",
+        // language: "en",
       });
 
-      return resp; // 성공하면 바로 반환
+      if (!resp || !resp.text) {
+        throw new Error("No text in transcription response");
+      }
+
+      return resp.text;
     } catch (err) {
-      lastErr = err;
       console.error(
-        "[transcribeWithRetry] attempt",
-        i + 1,
-        "failed:",
+        "[transcribeWithRetryMem] failed:",
         err?.code || err?.message || err
       );
-      // 잠깐 쉰 후 재시도
+      lastErr = err;
       await new Promise((r) => setTimeout(r, 500));
     }
   }
-  // 전부 실패하면 마지막 에러를 던진다
   throw lastErr;
 }
 
-/* -------------------------------------------------
-   1) /transcribe
-   - 클라이언트 필드명: "file"
-   - 리턴: { text }
-------------------------------------------------- */
+/* ---------------- /transcribe (debug) ---------------- */
 app.post("/transcribe", upload.single("file"), async (req, res) => {
-  let tempPath;
   try {
-    if (!req.file)
+    if (!req.file) {
       return res.status(400).json({ error: "file field is required" });
+    }
 
-    tempPath = req.file.path;
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({
+        error: "Server missing OPENAI_API_KEY",
+      });
+    }
 
-    // Whisper 한 번만 (여긴 급하지 않으니까 굳이 retry 안 붙여도 됨)
-    const resp = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(tempPath),
-      model: "whisper-1",
-      language: "en",
-    });
+    const text = await transcribeWithRetryMem(
+      req.file.buffer,
+      req.file.originalname || "audio.m4a",
+      3
+    );
 
-    res.json({ text: resp.text || "" });
+    return res.json({ text });
   } catch (err) {
     console.error("[/transcribe] error:", err);
-    res.status(500).json({ error: err.message || "transcribe failed" });
-  } finally {
-    if (tempPath) {
-      try {
-        fs.unlinkSync(tempPath);
-      } catch {}
-    }
+    return res.status(500).json({
+      error: {
+        message: err.message || "transcribe failed",
+        code: err.code,
+        status: err.status,
+      },
+    });
   }
 });
 
-/* -------------------------------------------------
-   2) /speech/score
-   - 클라이언트 전송 필드:
-        audio  -> 녹음파일 (multipart/form-data)
-        target -> 유저가 읽어야 했던 문장 (문자열)
-   - 리턴: { transcript, accuracy, tips: [] }
-------------------------------------------------- */
+/* ---------------- /speech/score ---------------- */
 app.post("/speech/score", upload.single("audio"), async (req, res) => {
-  let tempPath;
   try {
-    const target = String(req.body?.target || "");
-    if (!req.file)
+    if (!req.file) {
       return res.status(400).json({ error: "audio field is required" });
+    }
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({
+        error: "Server missing OPENAI_API_KEY",
+      });
+    }
 
-    tempPath = req.file.path;
+    const targetSentence = String(req.body?.target || "");
 
-    // 🔁 Whisper 재시도 호출
-    const tr = await transcribeWithRetry(tempPath, 3);
-    const transcript = tr.text || "";
+    // 음성 -> 텍스트
+    const transcript = await transcribeWithRetryMem(
+      req.file.buffer,
+      req.file.originalname || "speech.m4a",
+      3
+    );
 
-    // 간단 채점
-    const { accuracy, tips } = simpleTextScore(target, transcript);
+    // 채점
+    const { accuracy, tips } = simpleTextScore(targetSentence, transcript);
 
-    res.json({ transcript, accuracy, tips });
+    return res.json({
+      ok: true,
+      transcript,
+      accuracy,
+      tips,
+    });
   } catch (err) {
     console.error("[/speech/score] error:", err);
-    res
-      .status(500)
-      .json({ error: err.message || "Connection error." });
-  } finally {
-    if (tempPath) {
-      try {
-        fs.unlinkSync(tempPath);
-      } catch {}
-    }
+    return res.status(500).json({
+      ok: false,
+      error: {
+        message: err.message || "Connection error.",
+        code: err.code,
+        status: err.status,
+      },
+    });
   }
 });
 
 // ===== Start Server =====
 const PORT = Number(process.env.PORT || 4000);
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });
